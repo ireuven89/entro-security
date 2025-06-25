@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"github.com/ireuven89/entro/service"
 	"net/http"
+
+	"github.com/ireuven89/entro/service"
 )
 
 func scanHandler(w http.ResponseWriter, r *http.Request) {
@@ -19,7 +21,14 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	organization := query.Get("organization")
 	token := query.Get("token")
 
-	service.StartScan(organization, repository, token)
+	result, err := service.StartScan(organization, repository, token)
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func main() {
