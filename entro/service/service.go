@@ -8,9 +8,13 @@ import (
 	"regexp"
 )
 
-var base64Encoded = "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
-var commitsApi = "https://api.github.com/repos/%s/%s/commits?page=%d&per_page=10"
-var commitApi = "https://api.github.com/repos/%s/%s/commits/%s"
+var (
+	commitsApi          = "https://api.github.com/repos/%s/%s/commits?page=%d&per_page=10"
+	commitApi           = "https://api.github.com/repos/%s/%s/commits/%s"
+	secretKeyPattern    = regexp.MustCompile("[A-Za-z0-9+/]{40}")
+	AccessKeyPattern    = regexp.MustCompile("(?:AKIA|ASIA|AIDA|AROA)[A-HJ-NP-Z2-7]{16,20}")
+	SessionTokenPattern = regexp.MustCompile("[A-Za-z0-9+/]{60,}={0,2}")
+)
 
 type CommitsResponse struct {
 	Commits []Commit
@@ -41,8 +45,14 @@ type ScanResponse struct {
 }
 
 type FoundSecret struct {
-	Filename string `json:"filename"`
-	Sha      string `json:"sha"`
+	Filename string   `json:"filename"`
+	Sha      string   `json:"sha"`
+	Secret   []Secret `json:"secrets"`
+}
+
+type Secret struct {
+	Type   string `json:"type"`
+	Secret string `json:"secret"`
 }
 
 func StartScan(owner, repo, repoToken string) (ScanResponse, error) {
@@ -88,11 +98,16 @@ func makeHttpGet(url, token string, target interface{}) error {
 	if err != nil {
 		return fmt.Errorf("error executing request: %v", err)
 	}
+
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("error reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("got error response with status: %v, body: %v", resp.StatusCode, string(body))
 	}
 
 	if err := json.Unmarshal(body, target); err != nil {
@@ -128,25 +143,36 @@ func scanCommits(commits []Commit, owner, repo, token string) ([]FoundSecret, er
 	for _, commit := range commits {
 		resp, err := getCommit(fmt.Sprintf(commitApi, owner, repo, commit.Sha), token)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error executing request: %v", err)
 
 		}
 		for _, file := range resp.Files {
-			if isSecreteExists(file.Patch) {
-				fmt.Printf("found secret in  %s\n", file.Filename)
-				foundSecrets = append(foundSecrets, FoundSecret{Filename: file.Filename, Sha: file.Sha})
+			secrets := findFileSecrets(file.Patch)
+
+			if len(secrets) > 0 {
+				foundSecrets = append(foundSecrets, FoundSecret{Filename: file.Filename, Sha: file.Sha, Secret: secrets})
 			}
 		}
 	}
 
-	return nil, nil
+	return foundSecrets, nil
 }
 
-func isSecreteExists(s string) bool {
-	re, err := regexp.Compile(base64Encoded)
-	if err != nil {
-		return false
+func findFileSecrets(s string) []Secret {
+	var secrets []Secret
+
+	if accessKey := AccessKeyPattern.FindString(s); accessKey != "" {
+		secrets = append(secrets, Secret{Type: "access_key", Secret: accessKey})
 	}
 
-	return re.MatchString(s)
+	if sessionKey := SessionTokenPattern.FindString(s); sessionKey != "" {
+		secrets = append(secrets, Secret{Type: "session_key", Secret: sessionKey})
+	}
+
+	if secretKey := secretKeyPattern.FindString(s); secretKey != "" {
+
+		secrets = append(secrets, Secret{Type: "secret_key", Secret: secretKey})
+	}
+
+	return secrets
 }
